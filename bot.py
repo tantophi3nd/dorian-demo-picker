@@ -2,11 +2,12 @@
 Random Demo Picker — a lightweight Discord bot.
 
 Scans a specific channel's message history for SoundCloud and Dropbox
-links, and lets anyone run /randomdemo to get a random one for feedback.
-An optional timeframe (e.g. 7d, 24h) limits the search to recent messages
-only, which is faster and handy for picking from a live session's posts.
+links, and offers two ways to pick a random one for feedback:
 
-No database, no caching — it just reads the channel live each time the
+  /randomdemo all              — searches the entire channel history
+  /randomdemo timeframe <val>  — only searches recent messages (e.g. 7d, 24h)
+
+No database, no caching — it just reads the channel live each time a
 command is used, so it always reflects whatever's currently posted there.
 """
 
@@ -94,21 +95,10 @@ async def on_ready():
     log.info("Logged in as %s (ID: %s)", bot.user, bot.user.id)
 
 
-@bot.tree.command(name="randomdemo", description="Pick a random demo link (SoundCloud/Dropbox) from the demo channel")
-@app_commands.describe(timeframe="Only search recent messages, e.g. 30m, 24h, 7d, 2w. Omit to search the whole channel.")
-async def randomdemo(interaction: discord.Interaction, timeframe: Optional[str] = None):
+async def _run_randomdemo(interaction: discord.Interaction, delta: Optional[timedelta], scope_desc: str) -> None:
+    """Shared logic for both subcommands: fetch the channel, scan its
+    history (optionally bounded by `delta`), and reply with a random pick."""
     await interaction.response.defer()
-
-    delta = None
-    if timeframe is not None:
-        delta = parse_timeframe(timeframe)
-        if delta is None:
-            await interaction.followup.send(
-                "Couldn't understand that timeframe. Use a number plus a unit — "
-                "`m` (minutes), `h` (hours), `d` (days), or `w` (weeks). "
-                "Examples: `30m`, `24h`, `7d`, `2w`."
-            )
-            return
 
     channel = bot.get_channel(DEMO_CHANNEL_ID)
     if channel is None:
@@ -128,10 +118,8 @@ async def randomdemo(interaction: discord.Interaction, timeframe: Optional[str] 
 
     if delta is not None:
         history = channel.history(after=discord.utils.utcnow() - delta, limit=TIMEFRAME_MESSAGE_CAP)
-        scope_desc = f"the last {timeframe.strip().lower()}"
     else:
         history = channel.history(limit=HISTORY_LIMIT)
-        scope_desc = f"the last {HISTORY_LIMIT} messages"
 
     found = []
     async for message in history:
@@ -139,9 +127,7 @@ async def randomdemo(interaction: discord.Interaction, timeframe: Optional[str] 
             found.append((link, message.author.display_name, message.jump_url))
 
     if not found:
-        await interaction.followup.send(
-            f"No SoundCloud or Dropbox links found in {scope_desc}."
-        )
+        await interaction.followup.send(f"No SoundCloud or Dropbox links found in {scope_desc}.")
         return
 
     link, author, jump_url = random.choice(found)
@@ -152,6 +138,35 @@ async def randomdemo(interaction: discord.Interaction, timeframe: Optional[str] 
         f"[Jump to original message]({jump_url})\n\n"
         f"*(searched {scope_desc} — {len(found)} eligible demo{'s' if len(found) != 1 else ''} in the pool)*"
     )
+
+
+demo_group = app_commands.Group(
+    name="randomdemo",
+    description="Pick a random demo link (SoundCloud/Dropbox) for feedback",
+)
+
+
+@demo_group.command(name="all", description="Pick a random demo from the entire channel history")
+async def randomdemo_all(interaction: discord.Interaction):
+    await _run_randomdemo(interaction, delta=None, scope_desc=f"the last {HISTORY_LIMIT} messages")
+
+
+@demo_group.command(name="timeframe", description="Pick a random demo from messages posted within a timeframe")
+@app_commands.describe(timeframe="How far back to search: a number plus m/h/d/w, e.g. 30m, 24h, 7d, 2w")
+async def randomdemo_timeframe(interaction: discord.Interaction, timeframe: str):
+    delta = parse_timeframe(timeframe)
+    if delta is None:
+        await interaction.response.send_message(
+            "Couldn't understand that timeframe. Use a number plus a unit — "
+            "`m` (minutes), `h` (hours), `d` (days), or `w` (weeks). "
+            "Examples: `30m`, `24h`, `7d`, `2w`.",
+            ephemeral=True,
+        )
+        return
+    await _run_randomdemo(interaction, delta=delta, scope_desc=f"the last {timeframe.strip().lower()}")
+
+
+bot.tree.add_command(demo_group)
 
 
 if __name__ == "__main__":
