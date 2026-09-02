@@ -2,7 +2,7 @@
 Random Demo Picker — a lightweight Discord bot.
 
 Scans a specific channel's message history for SoundCloud and Dropbox
-links, and lets anyone run /randomdemo to get a random one for feedback.
+links, and lets anyone run !randomdemo to get a random one for feedback.
 
 No database, no caching — it just reads the channel live each time the
 command is used, so it always reflects whatever's currently posted there.
@@ -14,7 +14,6 @@ import random
 import logging
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
@@ -59,54 +58,49 @@ def extract_allowed_links(text: str) -> list[str]:
 
 @bot.event
 async def on_ready():
-    try:
-        synced = await bot.tree.sync()
-        log.info("Synced %d command(s)", len(synced))
-    except Exception as e:
-        log.error("Command sync failed: %s", e)
     log.info("Logged in as %s (ID: %s)", bot.user, bot.user.id)
+    log.info("Ready — try !randomdemo in your server")
 
 
-@bot.tree.command(name="randomdemo", description="Pick a random demo link (SoundCloud/Dropbox) from the demo channel")
-async def randomdemo(interaction: discord.Interaction):
-    await interaction.response.defer()
+@bot.command(name="randomdemo", help="Pick a random demo link (SoundCloud/Dropbox) from the demo channel")
+async def randomdemo(ctx: commands.Context):
+    async with ctx.typing():
+        channel = bot.get_channel(DEMO_CHANNEL_ID)
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(DEMO_CHANNEL_ID)
+            except discord.NotFound:
+                await ctx.send(
+                    "Couldn't find the demo channel — check the `DEMO_CHANNEL_ID` in the bot's `.env` file."
+                )
+                return
+            except discord.Forbidden:
+                await ctx.send(
+                    "I don't have permission to view that channel. Make sure I have the "
+                    "**View Channel** and **Read Message History** permissions there."
+                )
+                return
 
-    channel = bot.get_channel(DEMO_CHANNEL_ID)
-    if channel is None:
-        try:
-            channel = await bot.fetch_channel(DEMO_CHANNEL_ID)
-        except discord.NotFound:
-            await interaction.followup.send(
-                "Couldn't find the demo channel — check the `DEMO_CHANNEL_ID` in the bot's `.env` file."
+        found = []
+        async for message in channel.history(limit=HISTORY_LIMIT):
+            for link in extract_allowed_links(message.content):
+                found.append((link, message.author.display_name, message.jump_url))
+
+        if not found:
+            await ctx.send(
+                "No SoundCloud or Dropbox links found in that channel (within the last "
+                f"{HISTORY_LIMIT} messages)."
             )
             return
-        except discord.Forbidden:
-            await interaction.followup.send(
-                "I don't have permission to view that channel. Make sure I have the "
-                "**View Channel** and **Read Message History** permissions there."
-            )
-            return
 
-    found = []
-    async for message in channel.history(limit=HISTORY_LIMIT):
-        for link in extract_allowed_links(message.content):
-            found.append((link, message.author.display_name, message.jump_url))
-
-    if not found:
-        await interaction.followup.send(
-            "No SoundCloud or Dropbox links found in that channel (within the last "
-            f"{HISTORY_LIMIT} messages)."
+        link, author, jump_url = random.choice(found)
+        await ctx.send(
+            "🎲 **Random Demo Picked!**\n"
+            f"Posted by **{author}**\n"
+            f"{link}\n"
+            f"[Jump to original message]({jump_url})\n\n"
+            f"*({len(found)} eligible demo{'s' if len(found) != 1 else ''} in the pool)*"
         )
-        return
-
-    link, author, jump_url = random.choice(found)
-    await interaction.followup.send(
-        "🎲 **Random Demo Picked!**\n"
-        f"Posted by **{author}**\n"
-        f"{link}\n"
-        f"[Jump to original message]({jump_url})\n\n"
-        f"*({len(found)} eligible demo{'s' if len(found) != 1 else ''} in the pool)*"
-    )
 
 
 if __name__ == "__main__":
