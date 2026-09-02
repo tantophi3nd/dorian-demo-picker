@@ -3,6 +3,8 @@ Random Demo Picker — a lightweight Discord bot.
 
 Scans a specific channel's message history for SoundCloud and Dropbox
 links, and lets anyone run /randomdemo to get a random one for feedback.
+An optional timeframe (e.g. 7d, 24h) limits the search to recent messages
+only, which is faster and handy for picking from a live session's posts.
 
 No database, no caching — it just reads the channel live each time the
 command is used, so it always reflects whatever's currently posted there.
@@ -12,6 +14,8 @@ import os
 import re
 import random
 import logging
+from datetime import timedelta
+from typing import Optional
 
 import discord
 from discord import app_commands
@@ -22,9 +26,22 @@ load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 DEMO_CHANNEL_ID = int(os.getenv("DEMO_CHANNEL_ID", "0"))
-# How many recent messages to scan per run. Raise this if your channel
-# has a long history and links are getting missed.
+# How many recent messages to scan per run when no timeframe is given.
+# Raise this if your channel has a long history and links are getting missed.
 HISTORY_LIMIT = int(os.getenv("HISTORY_LIMIT", "2000"))
+
+# Safety cap on messages scanned even when a timeframe IS given, in case a
+# channel is extremely active. Time-filtered searches rarely need this.
+TIMEFRAME_MESSAGE_CAP = int(os.getenv("TIMEFRAME_MESSAGE_CAP", "5000"))
+
+# Accepts things like "30m", "24h", "7d", "2w" (case-insensitive).
+TIMEFRAME_PATTERN = re.compile(r"^\s*(\d+)\s*([mhdw])\s*$", re.IGNORECASE)
+TIMEFRAME_UNITS = {
+    "m": "minutes",
+    "h": "hours",
+    "d": "days",
+    "w": "weeks",
+}
 
 # Only links from these domains are considered valid demos.
 # Subdomains are allowed (e.g. "www.dropbox.com", "on.soundcloud.com").
@@ -57,6 +74,16 @@ def extract_allowed_links(text: str) -> list[str]:
     return [url.rstrip(").,>") for url in URL_PATTERN.findall(text) if is_allowed_link(url)]
 
 
+def parse_timeframe(value: str) -> Optional[timedelta]:
+    """Parse a string like '7d', '24h', '30m', or '2w' into a timedelta.
+    Returns None if the string doesn't match the expected format."""
+    match = TIMEFRAME_PATTERN.match(value)
+    if not match:
+        return None
+    amount, unit = match.groups()
+    return timedelta(**{TIMEFRAME_UNITS[unit.lower()]: int(amount)})
+
+
 @bot.event
 async def on_ready():
     try:
@@ -68,8 +95,20 @@ async def on_ready():
 
 
 @bot.tree.command(name="randomdemo", description="Pick a random demo link (SoundCloud/Dropbox) from the demo channel")
-async def randomdemo(interaction: discord.Interaction):
+@app_commands.describe(timeframe="Only search recent messages, e.g. 30m, 24h, 7d, 2w. Omit to search the whole channel.")
+async def randomdemo(interaction: discord.Interaction, timeframe: Optional[str] = None):
     await interaction.response.defer()
+
+    delta = None
+    if timeframe is not None:
+        delta = parse_timeframe(timeframe)
+        if delta is None:
+            await interaction.followup.send(
+                "Couldn't understand that timeframe. Use a number plus a unit — "
+                "`m` (minutes), `h` (hours), `d` (days), or `w` (weeks). "
+                "Examples: `30m`, `24h`, `7d`, `2w`."
+            )
+            return
 
     channel = bot.get_channel(DEMO_CHANNEL_ID)
     if channel is None:
@@ -87,15 +126,21 @@ async def randomdemo(interaction: discord.Interaction):
             )
             return
 
+    if delta is not None:
+        history = channel.history(after=discord.utils.utcnow() - delta, limit=TIMEFRAME_MESSAGE_CAP)
+        scope_desc = f"the last {timeframe.strip().lower()}"
+    else:
+        history = channel.history(limit=HISTORY_LIMIT)
+        scope_desc = f"the last {HISTORY_LIMIT} messages"
+
     found = []
-    async for message in channel.history(limit=HISTORY_LIMIT):
+    async for message in history:
         for link in extract_allowed_links(message.content):
             found.append((link, message.author.display_name, message.jump_url))
 
     if not found:
         await interaction.followup.send(
-            "No SoundCloud or Dropbox links found in that channel (within the last "
-            f"{HISTORY_LIMIT} messages)."
+            f"No SoundCloud or Dropbox links found in {scope_desc}."
         )
         return
 
@@ -105,7 +150,7 @@ async def randomdemo(interaction: discord.Interaction):
         f"Posted by **{author}**\n"
         f"{link}\n"
         f"[Jump to original message]({jump_url})\n\n"
-        f"*({len(found)} eligible demo{'s' if len(found) != 1 else ''} in the pool)*"
+        f"*(searched {scope_desc} — {len(found)} eligible demo{'s' if len(found) != 1 else ''} in the pool)*"
     )
 
 
